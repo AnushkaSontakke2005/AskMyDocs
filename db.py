@@ -1,5 +1,6 @@
 from os import getenv
 from datetime import datetime
+from threading import Lock
 from urllib.parse import urlparse
 from pgvector.peewee import VectorField
 from peewee import (
@@ -14,6 +15,9 @@ from peewee import (
 )
 from dotenv import load_dotenv
 load_dotenv()  # add this before anything else
+
+_database_initialized = False
+_database_lock = Lock()
 
 database_url = getenv("DATABASE_URL")
 
@@ -129,11 +133,6 @@ class ApiUsage(Model):
       database = db
       db_table = 'api_usage'
 
-db.connect()
-db.execute_sql("CREATE EXTENSION IF NOT EXISTS vector")
-
-db.create_tables([Users])
-
 def _table_exists(table_name: str) -> bool:
    result = db.execute_sql(
       """
@@ -160,24 +159,6 @@ def _ensure_column(table_name: str, column_name: str, definition: str):
    if not _column_exists(table_name, column_name):
       db.execute_sql(f'ALTER TABLE "{table_name}" ADD COLUMN "{column_name}" {definition}')
 
-if _table_exists("documents"):
-   _ensure_column("documents", "user_id", "INTEGER REFERENCES users(id) ON DELETE CASCADE")
-if _table_exists("tags"):
-   _ensure_column("tags", "user_id", "INTEGER REFERENCES users(id) ON DELETE CASCADE")
-if _table_exists("users"):
-   _ensure_column("users", "is_admin", "BOOLEAN DEFAULT FALSE")
-
-db.create_tables([
-   Documents,
-   Tags,
-   DocumentTags,
-   DocumentInformationChunks,
-   DocumentProcessingJobs,
-   ChatMessages,
-   QuestionUsage,
-   ApiUsage,
-])
-
 def _ensure_first_admin():
    admin_exists = Users.select().where(Users.is_admin == True).exists()
    if not admin_exists:
@@ -186,8 +167,6 @@ def _ensure_first_admin():
          first_user.is_admin = True
          first_user.save()
 
-_ensure_first_admin()
-
 def _assign_orphan_rows_to_admin():
    admin_user = Users.select().where(Users.is_admin == True).order_by(Users.id.asc()).first()
    if not admin_user:
@@ -195,4 +174,38 @@ def _assign_orphan_rows_to_admin():
    Documents.update(user_id=admin_user.id).where(Documents.user_id.is_null(True)).execute()
    Tags.update(user_id=admin_user.id).where(Tags.user_id.is_null(True)).execute()
 
-_assign_orphan_rows_to_admin()
+def initialize_database():
+   global _database_initialized
+   if _database_initialized:
+      return
+
+   with _database_lock:
+      if _database_initialized:
+         return
+
+      db.connect(reuse_if_open=True)
+      db.execute_sql("CREATE EXTENSION IF NOT EXISTS vector")
+
+      db.create_tables([Users])
+
+      if _table_exists("documents"):
+         _ensure_column("documents", "user_id", "INTEGER REFERENCES users(id) ON DELETE CASCADE")
+      if _table_exists("tags"):
+         _ensure_column("tags", "user_id", "INTEGER REFERENCES users(id) ON DELETE CASCADE")
+      if _table_exists("users"):
+         _ensure_column("users", "is_admin", "BOOLEAN DEFAULT FALSE")
+
+      db.create_tables([
+         Documents,
+         Tags,
+         DocumentTags,
+         DocumentInformationChunks,
+         DocumentProcessingJobs,
+         ChatMessages,
+         QuestionUsage,
+         ApiUsage,
+      ])
+
+      _ensure_first_admin()
+      _assign_orphan_rows_to_admin()
+      _database_initialized = True

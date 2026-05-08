@@ -9,7 +9,7 @@ from typing import Optional
 from fastapi import Depends, HTTPException, status
 from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
 
-from db import Users
+from db import Users, initialize_database
 
 
 TOKEN_SECRET_KEY = os.getenv("TOKEN_SECRET_KEY", "dev-only-change-this-secret")
@@ -51,6 +51,7 @@ def create_access_token(user: Users) -> str:
 
 
 def authenticate_user(email: str, password: str) -> Optional[Users]:
+    initialize_database()
     user = Users.get_or_none(Users.email == normalize_email(email))
     if not user or not verify_password(password, user.password_hash):
         return None
@@ -58,6 +59,7 @@ def authenticate_user(email: str, password: str) -> Optional[Users]:
 
 
 def get_current_api_user(credentials: HTTPAuthorizationCredentials = Depends(bearer_scheme)) -> Users:
+    initialize_database()
     credentials_error = HTTPException(
         status_code=status.HTTP_401_UNAUTHORIZED,
         detail="Could not validate credentials.",

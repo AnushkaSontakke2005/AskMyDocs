@@ -9,7 +9,7 @@ from backend.security import (
     hash_password,
     normalize_email,
 )
-from db import Users
+from db import Users, initialize_database
 
 
 router = APIRouter(prefix="/auth", tags=["Auth"])
@@ -21,6 +21,7 @@ def serialize_user(user: Users) -> UserResponse:
 
 @router.post("/signup", response_model=TokenResponse, status_code=status.HTTP_201_CREATED)
 def signup(payload: SignupRequest):
+    initialize_database()
     email = normalize_email(payload.email)
     if Users.get_or_none(Users.email == email):
         raise HTTPException(

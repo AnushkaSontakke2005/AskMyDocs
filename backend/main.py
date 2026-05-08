@@ -1,4 +1,5 @@
 from datetime import datetime
+from threading import Thread
 
 from fastapi import FastAPI
 
@@ -17,6 +18,13 @@ def health_check():
         "service": "askmydocs-api",
         "timestamp": datetime.utcnow().isoformat() + "Z",
     }
+
+
+@app.on_event("startup")
+def start_database_initialization():
+    from db import initialize_database
+
+    Thread(target=initialize_database, daemon=True).start()
 
 
 def include_app_routers():
