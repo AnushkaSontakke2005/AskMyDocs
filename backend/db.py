@@ -23,28 +23,37 @@ _vector_initialized = False
 
 database_url = getenv("DATABASE_URL")
 
-if database_url:
+if database_url and "://" in database_url:
    db = connect(database_url)
 else:
-   required_postgres_vars = [
-      "POSTGRES_DB_NAME",
-      "POSTGRES_DB_HOST",
-      "POSTGRES_DB_PORT",
-      "POSTGRES_DB_USER",
-      "POSTGRES_DB_PASSWORD",
+   postgres_db_name = getenv("POSTGRES_DB_NAME") or getenv("PGDATABASE")
+   postgres_host = getenv("POSTGRES_DB_HOST") or getenv("PGHOST")
+   postgres_port = getenv("POSTGRES_DB_PORT") or getenv("PGPORT")
+   postgres_user = getenv("POSTGRES_DB_USER") or getenv("PGUSER")
+   postgres_password = getenv("POSTGRES_DB_PASSWORD") or getenv("PGPASSWORD")
+
+   missing_postgres_vars = [
+      name
+      for name, value in {
+         "POSTGRES_DB_NAME or PGDATABASE": postgres_db_name,
+         "POSTGRES_DB_HOST or PGHOST": postgres_host,
+         "POSTGRES_DB_PORT or PGPORT": postgres_port,
+         "POSTGRES_DB_USER or PGUSER": postgres_user,
+         "POSTGRES_DB_PASSWORD or PGPASSWORD": postgres_password,
+      }.items()
+      if not value
    ]
-   missing_postgres_vars = [name for name in required_postgres_vars if not getenv(name)]
    if missing_postgres_vars:
       raise RuntimeError(
-         "Database configuration is missing. Set DATABASE_URL or these variables: "
+         "Database configuration is missing. Set a valid DATABASE_URL or these variables: "
          + ", ".join(missing_postgres_vars)
       )
    db = PostgresqlDatabase(
-       getenv("POSTGRES_DB_NAME"),
-       host=getenv("POSTGRES_DB_HOST"),
-       port=getenv("POSTGRES_DB_PORT"),
-       user=getenv("POSTGRES_DB_USER"),
-       password=getenv("POSTGRES_DB_PASSWORD"),
+       postgres_db_name,
+       host=postgres_host,
+       port=postgres_port,
+       user=postgres_user,
+       password=postgres_password,
    )
 
 class Users(Model):

@@ -1,4 +1,5 @@
 from datetime import datetime
+from os import getenv
 from threading import Thread
 
 from fastapi import FastAPI
@@ -28,6 +29,22 @@ def database_debug():
         "database_class": type(db).__name__,
         "is_closed": db.is_closed(),
         "database_name": db.database,
+        "has_database_url": bool(getenv("DATABASE_URL")),
+        "database_url_looks_valid": "://" in getenv("DATABASE_URL", ""),
+        "has_pg_vars": all(
+            getenv(name)
+            for name in ["PGDATABASE", "PGHOST", "PGPORT", "PGUSER", "PGPASSWORD"]
+        ),
+        "has_postgres_vars": all(
+            getenv(name)
+            for name in [
+                "POSTGRES_DB_NAME",
+                "POSTGRES_DB_HOST",
+                "POSTGRES_DB_PORT",
+                "POSTGRES_DB_USER",
+                "POSTGRES_DB_PASSWORD",
+            ]
+        ),
     }
 
 
