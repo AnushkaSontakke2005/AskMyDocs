@@ -2,6 +2,7 @@ import traceback
 from os import getenv
 from datetime import datetime
 from threading import Lock
+from urllib.parse import urlparse
 from pgvector.peewee import VectorField
 from peewee import (
    PostgresqlDatabase,
@@ -23,23 +24,23 @@ _vector_initialized = False
 
 database_url = getenv("DATABASE_URL")
 
-if database_url and "://" in database_url:
+if database_url and "://" in database_url and urlparse(database_url).path.strip("/"):
    db = connect(database_url)
 else:
-   postgres_db_name = getenv("POSTGRES_DB_NAME") or getenv("PGDATABASE")
-   postgres_host = getenv("POSTGRES_DB_HOST") or getenv("PGHOST")
-   postgres_port = getenv("POSTGRES_DB_PORT") or getenv("PGPORT")
-   postgres_user = getenv("POSTGRES_DB_USER") or getenv("PGUSER")
-   postgres_password = getenv("POSTGRES_DB_PASSWORD") or getenv("PGPASSWORD")
+   postgres_db_name = getenv("POSTGRES_DB_NAME") or getenv("POSTGRES_DB") or getenv("PGDATABASE")
+   postgres_host = getenv("POSTGRES_DB_HOST") or getenv("POSTGRES_HOST") or getenv("PGHOST")
+   postgres_port = getenv("POSTGRES_DB_PORT") or getenv("POSTGRES_PORT") or getenv("PGPORT")
+   postgres_user = getenv("POSTGRES_DB_USER") or getenv("POSTGRES_USER") or getenv("PGUSER")
+   postgres_password = getenv("POSTGRES_DB_PASSWORD") or getenv("POSTGRES_PASSWORD") or getenv("PGPASSWORD")
 
    missing_postgres_vars = [
       name
       for name, value in {
-         "POSTGRES_DB_NAME or PGDATABASE": postgres_db_name,
-         "POSTGRES_DB_HOST or PGHOST": postgres_host,
-         "POSTGRES_DB_PORT or PGPORT": postgres_port,
-         "POSTGRES_DB_USER or PGUSER": postgres_user,
-         "POSTGRES_DB_PASSWORD or PGPASSWORD": postgres_password,
+         "POSTGRES_DB_NAME, POSTGRES_DB, or PGDATABASE": postgres_db_name,
+         "POSTGRES_DB_HOST, POSTGRES_HOST, or PGHOST": postgres_host,
+         "POSTGRES_DB_PORT, POSTGRES_PORT, or PGPORT": postgres_port,
+         "POSTGRES_DB_USER, POSTGRES_USER, or PGUSER": postgres_user,
+         "POSTGRES_DB_PASSWORD, POSTGRES_PASSWORD, or PGPASSWORD": postgres_password,
       }.items()
       if not value
    ]
