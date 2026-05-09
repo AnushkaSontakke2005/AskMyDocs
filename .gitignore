@@ -1,24 +1,35 @@
+# Virtual environments
 venv/
 env/
 .venv/
+env_anaconda_backup/
 
+# Python cache
 __pycache__/
 *.pyc
 
+# Node
 node_modules/
 
+# Vector stores
 chroma/
 faiss_index/
 vectorstore/
 
+# Secrets
 .env
+
+# OS
 .DS_Store
 
-*.db
-*.sqlite3
-
+# Streamlit local config
 .streamlit/
 
+# Build artifacts
 dist/
 build/
 .cache/
+
+# Databases
+*.db
+*.sqlite3
