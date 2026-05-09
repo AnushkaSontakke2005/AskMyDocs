@@ -3,7 +3,7 @@ from typing import Optional
 
 import streamlit as st
 
-from frontend.api_client import ApiClientError, get, post
+from frontend.api_client import APP_BUILD_VERSION, ApiClientError, get, get_api_base_url, post
 
 
 def _user_from_payload(payload: dict) -> SimpleNamespace:
@@ -41,6 +41,9 @@ def require_login() -> SimpleNamespace:
 def render_login_page():
     st.title("AskMyDocs")
     st.caption("Log in to see only your documents, tags, and chat history.")
+
+    with st.expander("Deployment debug", expanded=False):
+        st.code(f"Build: {APP_BUILD_VERSION}\nAPI: {get_api_base_url()}")
 
     tab_login, tab_signup = st.tabs(["Login", "Create account"])
 

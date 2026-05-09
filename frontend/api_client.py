@@ -13,6 +13,7 @@ from dotenv import load_dotenv
 load_dotenv()
 
 DEFAULT_API_BASE_URL = "https://askmydocs-production-ed37.up.railway.app"
+APP_BUILD_VERSION = "2026-05-09-streamlit-api-debug"
 
 
 def _api_base_url() -> str:
@@ -22,6 +23,10 @@ def _api_base_url() -> str:
         return st.secrets.get("ASKMYDOCS_API_URL", DEFAULT_API_BASE_URL).rstrip("/")
     except Exception:
         return DEFAULT_API_BASE_URL
+
+
+def get_api_base_url() -> str:
+    return _api_base_url()
 
 
 class ApiClientError(Exception):
