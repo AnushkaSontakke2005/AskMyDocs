@@ -1,3 +1,5 @@
+import traceback
+
 from fastapi import APIRouter, Depends, HTTPException, status
 from peewee import IntegrityError
 
@@ -21,15 +23,15 @@ def serialize_user(user: Users) -> UserResponse:
 
 @router.post("/signup", response_model=TokenResponse, status_code=status.HTTP_201_CREATED)
 def signup(payload: SignupRequest):
-    initialize_database()
-    email = normalize_email(payload.email)
-    if Users.get_or_none(Users.email == email):
-        raise HTTPException(
-            status_code=status.HTTP_409_CONFLICT,
-            detail="An account with this email already exists.",
-        )
-
     try:
+        initialize_database()
+        email = normalize_email(payload.email)
+        if Users.get_or_none(Users.email == email):
+            raise HTTPException(
+                status_code=status.HTTP_409_CONFLICT,
+                detail="An account with this email already exists.",
+            )
+
         should_be_admin = Users.select().count() == 0
         user = Users.create(
             email=email,
@@ -41,20 +43,37 @@ def signup(payload: SignupRequest):
             status_code=status.HTTP_409_CONFLICT,
             detail="An account with this email already exists.",
         )
+    except HTTPException:
+        raise
+    except Exception as exc:
+        traceback.print_exc()
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail=f"Auth signup failed: {type(exc).__name__}: {exc}",
+        )
 
     return TokenResponse(access_token=create_access_token(user))
 
 
 @router.post("/login", response_model=TokenResponse)
 def login(payload: LoginRequest):
-    user = authenticate_user(payload.email, payload.password)
-    if not user:
+    try:
+        user = authenticate_user(payload.email, payload.password)
+        if not user:
+            raise HTTPException(
+                status_code=status.HTTP_401_UNAUTHORIZED,
+                detail="Invalid email or password.",
+                headers={"WWW-Authenticate": "Bearer"},
+            )
+        return TokenResponse(access_token=create_access_token(user))
+    except HTTPException:
+        raise
+    except Exception as exc:
+        traceback.print_exc()
         raise HTTPException(
-            status_code=status.HTTP_401_UNAUTHORIZED,
-            detail="Invalid email or password.",
-            headers={"WWW-Authenticate": "Bearer"},
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail=f"Auth login failed: {type(exc).__name__}: {exc}",
         )
-    return TokenResponse(access_token=create_access_token(user))
 
 
 @router.get("/me", response_model=UserResponse)
