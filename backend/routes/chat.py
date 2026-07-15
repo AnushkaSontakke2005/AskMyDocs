@@ -1,6 +1,6 @@
 import json
 from time import perf_counter
-from typing import List, Optional
+from typing import List, Optional, TypedDict
 
 from anyio import sleep
 from fastapi import APIRouter, Depends, HTTPException
@@ -11,13 +11,20 @@ from backend.security import get_current_api_user
 from backend.services.constants import RESPOND_TO_MESSAGE_SYSTEM_PROMPT
 from backend.services.cost_tracking import record_llm_usage
 from backend.db import ChatMessages, DocumentInformationChunks, Documents, Users, initialize_database
-from backend.services.embeddings import get_embedding
+from backend.services.embeddings import get_embedding, rerank_chunks
 from backend.services.evaluation import evaluate_groundedness
 from backend.services.openai_client import openai_client
 from backend.services.rate_limit import DAILY_QUESTION_LIMIT, get_remaining_questions, increment_question_count
 
 
 router = APIRouter(prefix="/chat", tags=["Chat"])
+
+
+class RetrievedReference(TypedDict):
+    citation: int
+    text: str
+    page_number: Optional[int]
+    chunk_index: Optional[int]
 
 
 def serialize_message(row: ChatMessages) -> ChatMessageResponse:
@@ -31,11 +38,25 @@ def serialize_message(row: ChatMessages) -> ChatMessageResponse:
     )
 
 
-def get_related_chunks(user_id: int, question: str, document_id: Optional[int]) -> List[str]:
+def format_reference(reference: RetrievedReference) -> str:
+    location_parts = []
+    if reference["page_number"] is not None:
+        location_parts.append(f"page {reference['page_number']}")
+    if reference["chunk_index"] is not None:
+        location_parts.append(f"chunk {reference['chunk_index']}")
+    location = f" ({', '.join(location_parts)})" if location_parts else ""
+    return f"[{reference['citation']}]{location} {reference['text']}"
+
+
+def get_related_chunks(user_id: int, question: str, document_id: Optional[int]) -> List[RetrievedReference]:
     initialize_database(require_vector=True)
     query_embedding = get_embedding(question)
     base_query = (
-        DocumentInformationChunks.select(DocumentInformationChunks.chunk)
+        DocumentInformationChunks.select(
+            DocumentInformationChunks.chunk,
+            DocumentInformationChunks.page_number,
+            DocumentInformationChunks.chunk_index,
+        )
         .join(Documents)
         .where(Documents.user_id == user_id)
     )
@@ -51,10 +72,19 @@ def get_related_chunks(user_id: int, question: str, document_id: Optional[int]) 
 
     result = (
         base_query.order_by(SQL("embedding <-> %s::vector", (str(query_embedding),)))
-        .limit(5)
+        .limit(20)
         .execute()
     )
-    return [row.chunk for row in result]
+    reranked_rows = rerank_chunks(question, list(result), top_n=5)
+    return [
+        {
+            "citation": index + 1,
+            "text": row.chunk,
+            "page_number": row.page_number,
+            "chunk_index": row.chunk_index,
+        }
+        for index, row in enumerate(reranked_rows)
+    ]
 
 
 @router.post("/ask", response_model=ChatAskResponse)
@@ -78,6 +108,7 @@ async def ask_question(payload: ChatAskRequest, current_user: Users = Depends(ge
 
     increment_question_count(current_user.id)
     related_chunks = get_related_chunks(current_user.id, payload.question, payload.document_id)
+    formatted_references = [format_reference(reference) for reference in related_chunks]
 
     ChatMessages.create(
         user_id=current_user.id,
@@ -85,7 +116,6 @@ async def ask_question(payload: ChatAskRequest, current_user: Users = Depends(ge
         selected_document_name=selected_document_name,
         role="user",
         content=payload.question,
-        references=json.dumps(related_chunks) if related_chunks else None,
     )
 
     history = (
@@ -109,7 +139,7 @@ async def ask_question(payload: ChatAskRequest, current_user: Users = Depends(ge
                         "role": "system",
                         "content": RESPOND_TO_MESSAGE_SYSTEM_PROMPT.replace(
                             "{{knowledge}}",
-                            "\n".join(f"{index + 1}. {chunk}" for index, chunk in enumerate(related_chunks)),
+                            "\n\n".join(formatted_references),
                         ),
                     },
                     *[
@@ -131,7 +161,7 @@ async def ask_question(payload: ChatAskRequest, current_user: Users = Depends(ge
                 latency_ms=latency_ms,
             )
             answer = output.choices[0].message.content or ""
-            groundedness = await evaluate_groundedness(payload.question, answer, related_chunks, current_user.id)
+            groundedness = evaluate_groundedness(payload.question, answer, formatted_references)
 
             ChatMessages.create(
                 user_id=current_user.id,
@@ -139,6 +169,7 @@ async def ask_question(payload: ChatAskRequest, current_user: Users = Depends(ge
                 selected_document_name=selected_document_name,
                 role="assistant",
                 content=answer,
+                references=json.dumps(formatted_references) if formatted_references else None,
                 groundedness_label=groundedness["label"],
                 groundedness_score=groundedness["score"],
                 groundedness_reason=groundedness["reason"],
@@ -149,7 +180,7 @@ async def ask_question(payload: ChatAskRequest, current_user: Users = Depends(ge
                 groundedness_label=groundedness["label"],
                 groundedness_score=groundedness["score"],
                 groundedness_reason=groundedness["reason"],
-                references=related_chunks,
+                references=formatted_references,
                 remaining_questions=get_remaining_questions(current_user.id),
             )
         except HTTPException:

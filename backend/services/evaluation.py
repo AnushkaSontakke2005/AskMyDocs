@@ -1,11 +1,7 @@
-import json
-from time import perf_counter
+import re
 from typing import Literal, TypedDict
 
-from anyio import sleep
-
-from backend.services.cost_tracking import record_llm_usage
-from backend.services.openai_client import openai_client
+from backend.services.embeddings import get_embeddings
 
 
 class GroundednessResult(TypedDict):
@@ -14,21 +10,30 @@ class GroundednessResult(TypedDict):
     reason: str
 
 
-EVALUATE_ANSWER_SYSTEM_PROMPT = """
-You evaluate whether an answer is grounded in the supplied document excerpts.
-Score faithfulness from 0.0 to 1.0:
-- 1.0 means every material claim is directly supported by the excerpts.
-- 0.0 means the answer is mostly unsupported or contradicts the excerpts.
-Return strict JSON only:
-{"score": 0.0, "reason": "short explanation"}
-"""
+def split_sentences(text: str) -> list[str]:
+    return [
+        sentence.strip()
+        for sentence in re.split(r"(?<=[.!?])\s+", text)
+        if sentence.strip()
+    ]
 
 
-async def evaluate_groundedness(
+def extract_citation_numbers(answer: str) -> set[int]:
+    return {int(match) for match in re.findall(r"\[(\d+)\]", answer)}
+
+
+def strip_reference_prefix(reference: str) -> str:
+    return re.sub(r"^\[\d+\](?:\s*\([^)]*\))?\s*", "", reference).strip()
+
+
+def dot_product(left: list[float], right: list[float]) -> float:
+    return sum(a * b for a, b in zip(left, right))
+
+
+def evaluate_groundedness(
     question: str,
     answer: str,
     references: list[str],
-    user_id: int,
 ) -> GroundednessResult:
     if not references:
         return {
@@ -37,52 +42,45 @@ async def evaluate_groundedness(
             "reason": "No document references were retrieved for this answer.",
         }
 
-    user_prompt = "\n\n".join(
-        [
-            f"Question:\n{question}",
-            f"Answer:\n{answer}",
-            "Document excerpts:",
-            "\n".join(f"{index + 1}. {reference}" for index, reference in enumerate(references)),
-        ]
-    )
+    valid_citation_numbers = set(range(1, len(references) + 1))
+    answer_sentences = split_sentences(re.sub(r"\[\d+\]", "", answer))
+    reference_texts = [strip_reference_prefix(reference) for reference in references]
+    if not answer_sentences or not reference_texts:
+        return {
+            "label": "Hallucination Risk",
+            "score": 0.0,
+            "reason": "The answer or retrieved references were empty.",
+        }
 
-    total_retries = 0
-    while True:
-        try:
-            model = "llama-3.3-70b-versatile"
-            started_at = perf_counter()
-            output = await openai_client.chat.completions.create(
-                model=model,
-                messages=[
-                    {"role": "system", "content": EVALUATE_ANSWER_SYSTEM_PROMPT},
-                    {"role": "user", "content": user_prompt},
-                ],
-                temperature=0,
-                top_p=1,
-                response_format={"type": "json_object"},
-            )
-            latency_ms = int((perf_counter() - started_at) * 1000)
-            record_llm_usage(
-                user_id=user_id,
-                operation="groundedness_evaluation",
-                model=model,
-                response=output,
-                latency_ms=latency_ms,
-            )
-            content = output.choices[0].message.content or "{}"
-            parsed = json.loads(content)
-            score = max(0.0, min(1.0, float(parsed.get("score", 0.0))))
-            return {
-                "label": "Grounded" if score >= 0.75 else "Hallucination Risk",
-                "score": score,
-                "reason": str(parsed.get("reason", "No evaluator reason returned.")),
-            }
-        except Exception as exc:
-            total_retries += 1
-            if total_retries > 3:
-                return {
-                    "label": "Hallucination Risk",
-                    "score": 0.0,
-                    "reason": f"Groundedness evaluator failed: {exc}",
-                }
-            await sleep(1)
+    original_sentences = split_sentences(answer)
+    sentence_citation_hits = 0
+    invalid_citations = set()
+    for sentence in original_sentences:
+        sentence_citations = extract_citation_numbers(sentence)
+        invalid_citations.update(sentence_citations - valid_citation_numbers)
+        if sentence_citations & valid_citation_numbers:
+            sentence_citation_hits += 1
+
+    citation_coverage = sentence_citation_hits / max(len(original_sentences), 1)
+    sentence_embeddings = get_embeddings(answer_sentences)
+    reference_embeddings = get_embeddings(reference_texts)
+    best_sentence_scores = [
+        max(dot_product(sentence_embedding, reference_embedding) for reference_embedding in reference_embeddings)
+        for sentence_embedding in sentence_embeddings
+    ]
+    semantic_support = sum(best_sentence_scores) / len(best_sentence_scores)
+    score = max(0.0, min(1.0, (0.75 * semantic_support) + (0.25 * citation_coverage)))
+
+    if invalid_citations:
+        reason = (
+            f"Semantic support {semantic_support:.0%}; citation coverage {citation_coverage:.0%}. "
+            f"Invalid citation numbers used: {sorted(invalid_citations)}."
+        )
+    else:
+        reason = f"Semantic support {semantic_support:.0%}; citation coverage {citation_coverage:.0%}."
+
+    return {
+        "label": "Grounded" if score >= 0.75 else "Hallucination Risk",
+        "score": score,
+        "reason": reason,
+    }

@@ -97,7 +97,9 @@ class DocumentTags(Model):
 class DocumentInformationChunks(Model):
    document_id = ForeignKeyField(Documents, backref="document_information_chunks", on_delete='CASCADE')
    chunk = TextField()
-   embedding = VectorField(dimensions=384)  # ← was 1536
+   embedding = VectorField(dimensions=384)
+   page_number = IntegerField(null=True)
+   chunk_index = IntegerField(null=True)
    class Meta:
       database = db
       db_table = 'document_information_chunks'
@@ -246,6 +248,9 @@ def _initialize_vector_store(require_vector: bool = False):
       db.connect(reuse_if_open=True)
       db.execute_sql("CREATE EXTENSION IF NOT EXISTS vector")
       db.create_tables([DocumentInformationChunks])
+      if _table_exists("document_information_chunks"):
+         _ensure_column("document_information_chunks", "page_number", "INTEGER")
+         _ensure_column("document_information_chunks", "chunk_index", "INTEGER")
       _vector_initialized = True
    except Exception:
       print("Could not initialize pgvector-backed document chunk storage.")

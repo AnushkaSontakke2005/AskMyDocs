@@ -2,29 +2,32 @@ import asyncio
 import re
 from io import BytesIO
 from time import perf_counter
-from typing import Callable, Optional
+from typing import Callable, Optional, TypedDict
 
 import pdftotext
 from anyio import sleep
 from pydantic import BaseModel
 
-from backend.services.constants import CREATE_FACT_CHUNKS_SYSTEM_PROMPT, GET_MATCHING_TAGS_SYSTEM_PROMPT
+from backend.services.constants import GET_MATCHING_TAGS_SYSTEM_PROMPT
 from backend.services.cost_tracking import record_llm_usage
 from backend.db import DocumentInformationChunks, DocumentTags, Documents, Tags, db, initialize_database
-from backend.services.embeddings import get_embedding
+from backend.services.embeddings import get_embeddings
 from backend.services.openai_client import openai_client
 from backend.services.utils import find
 
 
-IDEAL_CHUNK_LENGTH = 4000
-
-
-class GeneratedDocumentInformationChunks(BaseModel):
-    facts: list[str]
+CHUNK_TOKEN_LENGTH = 700
+CHUNK_TOKEN_OVERLAP = 120
 
 
 class GeneratedMatchingTags(BaseModel):
     tags: list[str]
+
+
+class PreparedChunk(TypedDict):
+    text: str
+    page_number: int
+    chunk_index: int
 
 
 def get_retry_delay(error: Exception) -> float:
@@ -32,52 +35,6 @@ def get_retry_delay(error: Exception) -> float:
     if retry_match:
         return float(retry_match.group(1)) + 1
     return 5
-
-
-async def generate_chunks(
-    user_id: int,
-    index: int,
-    pdf_text_chunk: str,
-    document_processing_job_id: Optional[int] = None,
-):
-    total_retries = 0
-    while True:
-        try:
-            model = "llama-3.3-70b-versatile"
-            started_at = perf_counter()
-            output = await openai_client.chat.completions.create(
-                model=model,
-                messages=[
-                    {"role": "system", "content": CREATE_FACT_CHUNKS_SYSTEM_PROMPT},
-                    {"role": "user", "content": pdf_text_chunk},
-                ],
-                temperature=0.1,
-                top_p=1,
-                frequency_penalty=0,
-                presence_penalty=0,
-                response_format={"type": "json_object"},
-            )
-            latency_ms = int((perf_counter() - started_at) * 1000)
-            record_llm_usage(
-                user_id=user_id,
-                operation="document_chunk_generation",
-                model=model,
-                response=output,
-                latency_ms=latency_ms,
-                document_processing_job_id=document_processing_job_id,
-            )
-            if not output.choices[0].message.content:
-                raise Exception("No facts generated.")
-            facts = GeneratedDocumentInformationChunks.model_validate_json(output.choices[0].message.content).facts
-            print(f"Generated {len(facts)} facts for pdf text chunk {index}.")
-            return facts
-        except Exception as e:
-            total_retries += 1
-            if total_retries > 5:
-                raise e
-            retry_delay = get_retry_delay(e)
-            await sleep(retry_delay)
-            print(f"Failed to generate facts for pdf text chunk {index} with this err: {e}. Retrying in {retry_delay}s...")
 
 
 async def get_matching_tags(
@@ -140,22 +97,45 @@ async def get_matching_tags(
 
 async def process_pdf_text(
     user_id: int,
-    pdf_text_chunks: list[str],
     pdf_text: str,
     progress_callback: Callable[[int, str], None],
     document_processing_job_id: Optional[int] = None,
 ):
-    document_information_chunks_from_each_pdf_text_chunk = []
-    total_chunks = max(len(pdf_text_chunks), 1)
-    for index, pdf_text_chunk in enumerate(pdf_text_chunks):
-        progress_callback(15 + int((index / total_chunks) * 55), f"Generating facts {index + 1}/{total_chunks}")
-        document_information_chunks_from_each_pdf_text_chunk.append(
-            await generate_chunks(user_id, index, pdf_text_chunk, document_processing_job_id)
-        )
-
     progress_callback(75, "Matching tags")
     matching_tag_ids = await get_matching_tags(user_id, pdf_text[0:5000], document_processing_job_id)
-    return document_information_chunks_from_each_pdf_text_chunk, matching_tag_ids
+    return matching_tag_ids
+
+
+def tokenize_text(text: str) -> list[str]:
+    return re.findall(r"\S+", text)
+
+
+def prepare_token_chunks(pages: list[str]) -> list[PreparedChunk]:
+    chunks: list[PreparedChunk] = []
+    chunk_index = 0
+    step = CHUNK_TOKEN_LENGTH - CHUNK_TOKEN_OVERLAP
+
+    for page_number, page_text in enumerate(pages, start=1):
+        tokens = tokenize_text(page_text)
+        if not tokens:
+            continue
+
+        for start in range(0, len(tokens), step):
+            window = tokens[start : start + CHUNK_TOKEN_LENGTH]
+            if not window:
+                continue
+            chunks.append(
+                {
+                    "text": " ".join(window),
+                    "page_number": page_number,
+                    "chunk_index": chunk_index,
+                }
+            )
+            chunk_index += 1
+            if start + CHUNK_TOKEN_LENGTH >= len(tokens):
+                break
+
+    return chunks
 
 
 def upload_document_sync(
@@ -169,40 +149,35 @@ def upload_document_sync(
     progress_callback = progress_callback or (lambda progress, message: None)
     progress_callback(5, "Parsing PDF")
     parsed_pdf = pdftotext.PDF(BytesIO(pdf_file))
-    pdf_text = "\n\n".join(parsed_pdf)
-    pdf_text_chunks = [
-        pdf_text[i : i + IDEAL_CHUNK_LENGTH]
-        for i in range(0, len(pdf_text), IDEAL_CHUNK_LENGTH)
-    ]
+    pages = list(parsed_pdf)
+    pdf_text = "\n\n".join(pages)
+    prepared_chunks = prepare_token_chunks(pages)
 
-    progress_callback(10, f"Prepared {len(pdf_text_chunks)} text chunks")
+    progress_callback(10, f"Prepared {len(prepared_chunks)} token chunks")
     event_loop = asyncio.new_event_loop()
     asyncio.set_event_loop(event_loop)
     try:
-        document_information_chunks_from_each_pdf_text_chunk, matching_tag_ids = event_loop.run_until_complete(
-            process_pdf_text(user_id, pdf_text_chunks, pdf_text, progress_callback, document_processing_job_id)
+        matching_tag_ids = event_loop.run_until_complete(
+            process_pdf_text(user_id, pdf_text, progress_callback, document_processing_job_id)
         )
     finally:
         event_loop.close()
 
-    document_information_chunks = [
-        chunk
-        for chunks in document_information_chunks_from_each_pdf_text_chunk
-        for chunk in chunks
-    ]
-
     progress_callback(85, "Saving document")
     with db.atomic() as transaction:
         document_id = Documents.insert(name=name, user_id=user_id).execute()
-        if document_information_chunks:
+        if prepared_chunks:
+            embeddings = get_embeddings([chunk["text"] for chunk in prepared_chunks])
             DocumentInformationChunks.insert_many(
                 [
                     {
                         "document_id": document_id,
-                        "chunk": chunk,
-                        "embedding": get_embedding(chunk),
+                        "chunk": chunk["text"],
+                        "embedding": embedding,
+                        "page_number": chunk["page_number"],
+                        "chunk_index": chunk["chunk_index"],
                     }
-                    for chunk in document_information_chunks
+                    for chunk, embedding in zip(prepared_chunks, embeddings)
                 ]
             ).execute()
         if matching_tag_ids:
@@ -216,7 +191,7 @@ def upload_document_sync(
 
     progress_callback(100, "Completed")
     print(
-        f"Inserted {len(document_information_chunks)} facts for pdf {name} "
+        f"Inserted {len(prepared_chunks)} chunks for pdf {name} "
         f"with document id {document_id} and {len(matching_tag_ids)} matching tags."
     )
     return document_id
