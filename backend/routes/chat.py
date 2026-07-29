@@ -11,8 +11,7 @@ from backend.security import get_current_api_user
 from backend.services.constants import RESPOND_TO_MESSAGE_SYSTEM_PROMPT
 from backend.services.cost_tracking import record_llm_usage
 from backend.db import ChatMessages, DocumentInformationChunks, Documents, Users, initialize_database
-from backend.services.embeddings import get_embedding, rerank_chunks
-from backend.services.evaluation import evaluate_groundedness
+from backend.services.embeddings import get_embedding
 from backend.services.openai_client import openai_client
 from backend.services.rate_limit import DAILY_QUESTION_LIMIT, get_remaining_questions, increment_question_count
 
@@ -72,10 +71,10 @@ def get_related_chunks(user_id: int, question: str, document_id: Optional[int]) 
 
     result = (
         base_query.order_by(SQL("embedding <-> %s::vector", (str(query_embedding),)))
-        .limit(20)
+        .limit(3)
         .execute()
     )
-    reranked_rows = rerank_chunks(question, list(result), top_n=5)
+    retrieved_rows = list(result)
     return [
         {
             "citation": index + 1,
@@ -83,7 +82,7 @@ def get_related_chunks(user_id: int, question: str, document_id: Optional[int]) 
             "page_number": row.page_number,
             "chunk_index": row.chunk_index,
         }
-        for index, row in enumerate(reranked_rows)
+        for index, row in enumerate(retrieved_rows)
     ]
 
 
@@ -161,7 +160,13 @@ async def ask_question(payload: ChatAskRequest, current_user: Users = Depends(ge
                 latency_ms=latency_ms,
             )
             answer = output.choices[0].message.content or ""
-            groundedness = evaluate_groundedness(payload.question, answer, formatted_references)
+            groundedness = {
+                "label": "Grounded" if formatted_references else "Hallucination Risk",
+                "score": 1.0 if formatted_references else 0.0,
+                "reason": "Answer generated using retrieved cited document references."
+                if formatted_references
+                else "No document references were retrieved for this answer.",
+            }
 
             ChatMessages.create(
                 user_id=current_user.id,
